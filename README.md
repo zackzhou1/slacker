@@ -153,8 +153,7 @@ SQLite allows concurrent reads. Copy all three files to avoid lock issues:
 
 ```bash
 cp slack.db slack_snapshot.db
-cp slack.db-wal slack_snapshot.db-wal
-cp slack.db-shm slack_snapshot.db-shm
+cp slack.db-journal slack_snapshot.db-journal
 ```
 
 Then open `slack_snapshot.db` in DB Browser for SQLite or PyCharm's database panel.
