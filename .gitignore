@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Database output
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Data dumps (may contain sensitive info)
+*.json
+!package.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
