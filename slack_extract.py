@@ -46,8 +46,9 @@ class SlackClient:
         if cookie:
             self.session.cookies.set("d", cookie, domain=".slack.com")
 
-    def call(self, method: str, **params) -> dict:
-        time.sleep(REQUEST_DELAY)
+    def call(self, method: str, _skip_delay: bool = False, **params) -> dict:
+        if not _skip_delay:
+            time.sleep(REQUEST_DELAY)
         params["token"] = self.token
         resp = self.session.post(f"{BASE_URL}/{method}", data=params)
         if resp.status_code == 429:
@@ -250,7 +251,8 @@ def save_message(conn: sqlite3.Connection, ch_id: str, msg: dict):
 
 
 def fetch_messages(client: SlackClient, conn: sqlite3.Connection,
-                   only_channels: list = None, include_dms: bool = True):
+                   only_channels: list = None, include_dms: bool = True,
+                   since_ts: str = None):
     channels = conn.execute(
         "SELECT id, name, type, fetched_at, resume_cursor FROM channels"
     ).fetchall()
@@ -275,7 +277,61 @@ def fetch_messages(client: SlackClient, conn: sqlite3.Connection,
         display = ch_name or ch_id
 
         if fetched_at:
-            print(f"  [{i}/{total_channels}] #{display} — done ({fetched_at})")
+            # Already fully fetched — do an incremental update for new messages only
+            newest_ts = conn.execute(
+                "SELECT MAX(ts) FROM messages WHERE channel_id = ?", (ch_id,)
+            ).fetchone()[0]
+
+            # Use --since if provided and newer than what's in the DB
+            oldest_param = newest_ts
+            if since_ts and (not newest_ts or float(since_ts) > float(newest_ts)):
+                oldest_param = since_ts
+
+            if not oldest_param:
+                print(f"  [{i}/{total_channels}] #{display} — skipping (no ts baseline)")
+                continue
+
+            ts_dt = datetime.fromtimestamp(float(oldest_param), tz=timezone.utc).astimezone()
+            ts_str = ts_dt.strftime("%-m/%-d/%y %-I:%M %p")
+            print(f"  [{i}/{total_channels}] #{display} ({ch_type}) [incremental since {ts_str}]...")
+            new_count = 0
+            try:
+                # Single call first — avoids full paginate overhead when nothing is new
+                data = client.call("conversations.history", channel=ch_id,
+                                   oldest=oldest_param, limit=200)
+                messages = [m for m in data.get("messages", []) if m["ts"] != oldest_param]
+
+                if not messages:
+                    print(f"    no new messages")
+                    conn.execute("UPDATE channels SET fetched_at = ? WHERE id = ?",
+                                 (datetime.now(timezone.utc).isoformat(), ch_id))
+                    conn.commit()
+                    continue
+
+                for msg in messages:
+                    save_message(conn, ch_id, msg)
+                    new_count += 1
+                    if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == msg["ts"]:
+                        fetch_thread(client, conn, ch_id, msg["ts"])
+
+                # Keep paginating if there are more pages
+                cursor = data.get("response_metadata", {}).get("next_cursor")
+                while cursor:
+                    data = client.call("conversations.history", channel=ch_id,
+                                       oldest=oldest_param, cursor=cursor, limit=200)
+                    for msg in data.get("messages", []):
+                        save_message(conn, ch_id, msg)
+                        new_count += 1
+                        if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == msg["ts"]:
+                            fetch_thread(client, conn, ch_id, msg["ts"])
+                    cursor = data.get("response_metadata", {}).get("next_cursor")
+
+                conn.execute("UPDATE channels SET fetched_at = ? WHERE id = ?",
+                             (datetime.now(timezone.utc).isoformat(), ch_id))
+                conn.commit()
+                print(f"    {new_count} new messages")
+            except RuntimeError as e:
+                print(f"    SKIP: {e}")
             continue
 
         resuming = resume_cursor is not None
@@ -374,7 +430,18 @@ def main():
                         help="Only fetch messages for these channels (names or IDs, space-separated)")
     parser.add_argument("--no-dms", action="store_true",
                         help="Exclude DMs and group DMs when using --channels")
+    parser.add_argument("--since", metavar="YYYY-MM-DD",
+                        help="Only fetch messages newer than this date (e.g. 2025-01-01)")
     args = parser.parse_args()
+
+    since_ts = None
+    if args.since:
+        try:
+            since_ts = str(datetime.strptime(args.since, "%Y-%m-%d")
+                           .replace(tzinfo=timezone.utc).timestamp())
+            print(f"Only fetching messages since {args.since}")
+        except ValueError:
+            sys.exit("ERROR: --since must be in YYYY-MM-DD format")
 
     if not args.token:
         sys.exit("ERROR: No token found. Set SLACK_TOKEN env var or pass --token xoxc-...")
@@ -399,7 +466,7 @@ def main():
 
     # Step 4: messages (slowest step)
     print("Fetching messages (this will take a while)...")
-    fetch_messages(client, conn, only_channels=args.channels, include_dms=not args.no_dms)
+    fetch_messages(client, conn, only_channels=args.channels, include_dms=not args.no_dms, since_ts=since_ts)
 
     # Summary
     stats = {
