@@ -259,6 +259,36 @@
       color: var(--muted);
     }
 
+    .file-attachments { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+
+    .file-image {
+      max-width: 360px;
+      max-height: 280px;
+      border-radius: 6px;
+      border: 1px solid var(--thread-border);
+      cursor: pointer;
+      display: block;
+    }
+    .file-image:hover { opacity: 0.9; }
+
+    .file-card {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--code-bg);
+      border: 1px solid var(--thread-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+      max-width: 320px;
+    }
+    .file-card a { color: var(--link-color); text-decoration: none; }
+    .file-card a:hover { text-decoration: underline; }
+    .file-icon { font-size: 20px; flex-shrink: 0; }
+    .file-meta { display: flex; flex-direction: column; }
+    .file-size { font-size: 11px; color: var(--muted); }
+    .file-not-downloaded { font-size: 11px; color: var(--muted); font-style: italic; }
+
     /* ── Thread panel ── */
     #thread-panel {
       width: 380px;
@@ -569,6 +599,53 @@ async function fetchMessages(chId, beforeTs) {
   oldestTs = sorted[0]?.ts;
 }
 
+// ── Render file attachments ──
+function renderFiles(files) {
+  if (!files || !files.length) return '';
+  return '<div class="file-attachments">' + files.map(f => {
+    const sizeKb = f.size ? `${Math.round(f.size / 1024)}KB` : '';
+    const isImage = f.mimetype && f.mimetype.startsWith('image/');
+
+    if (!f.downloaded || !f.url) {
+      return `<div class="file-card">
+        <span class="file-icon">${isImage ? '🖼️' : '📄'}</span>
+        <div class="file-meta">
+          <span>${esc(f.title)}</span>
+          <span class="file-not-downloaded">not downloaded — run download_files.py</span>
+        </div>
+      </div>`;
+    }
+
+    if (isImage) {
+      return `<a href="${f.url}" target="_blank">
+        <img class="file-image" src="${f.url}" alt="${esc(f.title)}" loading="lazy">
+      </a>`;
+    }
+
+    const icon = fileIcon(f.mimetype);
+    return `<div class="file-card">
+      <span class="file-icon">${icon}</span>
+      <div class="file-meta">
+        <a href="${f.url}" target="_blank" download="${esc(f.name)}">${esc(f.title)}</a>
+        ${sizeKb ? `<span class="file-size">${sizeKb}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+function fileIcon(mimetype) {
+  if (!mimetype) return '📄';
+  if (mimetype.startsWith('video/')) return '🎥';
+  if (mimetype.startsWith('audio/')) return '🎵';
+  if (mimetype.includes('pdf')) return '📕';
+  if (mimetype.includes('zip') || mimetype.includes('compressed')) return '🗜️';
+  if (mimetype.includes('spreadsheet') || mimetype.includes('excel')) return '📊';
+  if (mimetype.includes('presentation') || mimetype.includes('powerpoint')) return '📊';
+  if (mimetype.includes('word') || mimetype.includes('document')) return '📝';
+  if (mimetype.includes('text') || mimetype.includes('json') || mimetype.includes('javascript')) return '📃';
+  return '📄';
+}
+
 // ── Render message ──
 function renderMessage(msg, compact = false) {
   const el = document.createElement('div');
@@ -594,6 +671,7 @@ function renderMessage(msg, compact = false) {
         <span class="msg-time">${msg.ts_display}</span>
       </div>
       <div class="msg-text">${msg.text || '<em style="color:var(--muted)">[no text]</em>'}</div>
+      ${renderFiles(msg.files)}
       ${reactions ? `<div class="reactions">${reactions}</div>` : ''}
       ${thread}
     </div>

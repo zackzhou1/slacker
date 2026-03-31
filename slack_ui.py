@@ -14,7 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, g, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
 DB_PATH = "slack.db"
@@ -125,9 +125,65 @@ def channel_display_name(ch_id: str, ch_name: str, ch_type: str) -> str:
         return user_display(ch_name)
     return ch_name or ch_id
 
-def serialize_message(r, include_channel=False) -> dict:
+def batch_file_lookup(raw_files_list: list[str]) -> dict:
+    """Given a list of raw files JSON strings, return a dict of file_id → DB row."""
+    ids = set()
+    for raw in raw_files_list:
+        try:
+            for f in json.loads(raw or "[]"):
+                if f.get("id"):
+                    ids.add(f["id"])
+        except Exception:
+            pass
+    if not ids:
+        return {}
+    db = get_db()
+    placeholders = ",".join("?" * len(ids))
+    rows = db.execute(
+        f"SELECT id, local_path, mimetype FROM files WHERE id IN ({placeholders})",
+        list(ids)
+    ).fetchall()
+    return {r["id"]: r for r in rows}
+
+
+def serialize_files(raw_files: str, file_lookup: dict = None) -> list:
+    try:
+        files = json.loads(raw_files or "[]")
+    except Exception:
+        return []
+    if not files:
+        return []
+
+    result = []
+    for f in files:
+        fid = f.get("id")
+        if not fid:
+            continue
+        row = (file_lookup or {}).get(fid)
+        local_path = row["local_path"] if row else None
+        if local_path:
+            p = Path(local_path)
+            if not p.is_absolute():
+                p = Path.cwd() / p
+            downloaded = p.exists()
+        else:
+            downloaded = False
+        result.append({
+            "id": fid,
+            "name": f.get("name", "file"),
+            "title": f.get("title") or f.get("name", "file"),
+            "mimetype": (row["mimetype"] if row else None) or f.get("mimetype", ""),
+            "size": f.get("size", 0),
+            "downloaded": downloaded,
+            "url": f"/api/files/{fid}" if downloaded else None,
+        })
+    return result
+
+
+def serialize_message(r, include_channel=False, file_lookup=None) -> dict:
     uid = r["user_id"]
     display = user_display(uid) if uid else "Unknown"
+    keys = r.keys()
     out = {
         "id": r["id"],
         "ts": r["ts"],
@@ -136,8 +192,9 @@ def serialize_message(r, include_channel=False) -> dict:
         "user_name": display,
         "text": format_text(r["text"]),
         "thread_ts": r["thread_ts"],
-        "reply_count": r["reply_count"] or 0 if "reply_count" in r.keys() else 0,
-        "reactions": json.loads(r["reactions"] or "[]") if "reactions" in r.keys() else [],
+        "reply_count": r["reply_count"] or 0 if "reply_count" in keys else 0,
+        "reactions": json.loads(r["reactions"] or "[]") if "reactions" in keys else [],
+        "files": serialize_files(r["files"], file_lookup) if "files" in keys else [],
     }
     if include_channel:
         ch_id = r["channel_id"]
@@ -212,8 +269,9 @@ def api_messages(ch_id):
     has_more = len(rows) > limit
     rows = rows[:limit]
 
+    file_lookup = batch_file_lookup([r["files"] for r in rows])
     return jsonify({
-        "messages": [serialize_message(r) for r in rows],
+        "messages": [serialize_message(r, file_lookup=file_lookup) for r in rows],
         "has_more": has_more,
     })
 
@@ -223,17 +281,59 @@ def api_thread(ch_id, thread_ts):
     db = get_db()
     rows = db.execute("""
         SELECT m.id, m.ts, m.user_id, m.text, m.thread_ts,
-               m.reply_count, m.reactions
+               m.reply_count, m.reactions, m.files
         FROM messages m
         WHERE m.channel_id = ? AND m.thread_ts = ?
         ORDER BY m.ts ASC
     """, (ch_id, thread_ts)).fetchall()
 
-    messages = [serialize_message(r) for r in rows]
-    # Flag the parent (first message, ts == thread_ts)
+    file_lookup = batch_file_lookup([r["files"] for r in rows])
+    messages = [serialize_message(r, file_lookup=file_lookup) for r in rows]
     if messages:
         messages[0]["is_parent"] = True
     return jsonify(messages)
+
+
+@app.route("/api/files/<file_id>")
+def api_file(file_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT local_path, name, mimetype FROM files WHERE id = ?", (file_id,)
+    ).fetchone()
+    if not row or not row["local_path"]:
+        return ("File not found or not downloaded", 404)
+    path = Path(row["local_path"])
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        return ("File missing from disk", 404)
+    return send_file(path, mimetype=row["mimetype"] or None,
+                     download_name=row["name"], as_attachment=False)
+
+
+@app.route("/api/channels/<ch_id>/files")
+def api_channel_files(ch_id):
+    db = get_db()
+    rows = db.execute("""
+        SELECT f.id, f.name, f.title, f.mimetype, f.size, f.message_ts,
+               f.local_path, f.user_id
+        FROM files f
+        WHERE f.channel_id = ?
+        ORDER BY f.message_ts DESC
+    """, (ch_id,)).fetchall()
+
+    return jsonify([{
+        "id": r["id"],
+        "name": r["name"],
+        "title": r["title"] or r["name"],
+        "mimetype": r["mimetype"] or "",
+        "size": r["size"] or 0,
+        "message_ts": r["message_ts"],
+        "ts_display": format_ts(r["message_ts"]) if r["message_ts"] else "",
+        "user_name": user_display(r["user_id"]) if r["user_id"] else "Unknown",
+        "downloaded": r["local_path"] is not None,
+        "url": f"/api/files/{r['id']}" if r["local_path"] else None,
+    } for r in rows])
 
 
 @app.route("/api/search")

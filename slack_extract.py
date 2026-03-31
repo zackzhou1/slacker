@@ -131,6 +131,25 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
         CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
         CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_ts);
+
+        CREATE TABLE IF NOT EXISTS files (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            title TEXT,
+            mimetype TEXT,
+            filetype TEXT,
+            size INTEGER,
+            channel_id TEXT,
+            message_ts TEXT,
+            user_id TEXT,
+            local_path TEXT,
+            downloaded_at TEXT,
+            url_private TEXT,
+            raw JSON
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_files_channel ON files(channel_id);
+        CREATE INDEX IF NOT EXISTS idx_files_message ON files(message_ts);
     """)
     # migrate old column name if needed
     cols = [r[1] for r in conn.execute("PRAGMA table_info(channels)").fetchall()]
@@ -420,12 +439,23 @@ def fetch_thread(client: SlackClient, conn: sqlite3.Connection, ch_id: str, thre
 # Main
 # ---------------------------------------------------------------------------
 
+def load_config() -> dict:
+    config_path = Path("config.json")
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text())
+        except Exception:
+            pass
+    return {}
+
 def main():
+    cfg = load_config()
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--token", default=os.environ.get("SLACK_TOKEN"))
-    parser.add_argument("--cookie", default=os.environ.get("SLACK_COOKIE"),
+    parser.add_argument("--token", default=os.environ.get("SLACK_TOKEN") or cfg.get("token"))
+    parser.add_argument("--cookie", default=os.environ.get("SLACK_COOKIE") or cfg.get("cookie"),
                         help="Value of the 'd' cookie from app.slack.com (required for xoxc- tokens)")
-    parser.add_argument("--db", default=str(DB_PATH))
+    parser.add_argument("--db", default=cfg.get("db", str(DB_PATH)))
     parser.add_argument("--channels", nargs="+", metavar="NAME_OR_ID",
                         help="Only fetch messages for these channels (names or IDs, space-separated)")
     parser.add_argument("--no-dms", action="store_true",
@@ -443,8 +473,8 @@ def main():
         except ValueError:
             sys.exit("ERROR: --since must be in YYYY-MM-DD format")
 
-    if not args.token:
-        sys.exit("ERROR: No token found. Set SLACK_TOKEN env var or pass --token xoxc-...")
+    if not args.token or args.token == "xoxc-...":
+        sys.exit("ERROR: No token set. Add it to config.json or pass --token xoxc-...")
 
     print(f"Database: {args.db}")
     conn = sqlite3.connect(args.db)

@@ -39,6 +39,12 @@ Both are required. The token identifies you; the cookie proves your session is a
 
 ## Usage
 
+create config.json
+{
+"token": "token",
+"cookie": "cookie"
+}
+
 ```bash
 python slack_extract.py --token xoxc-... --cookie xoxd-...
 ```
